@@ -1,85 +1,50 @@
 <img width="537" height="399" alt="avocard" src="https://github.com/user-attachments/assets/c1553bbd-e334-4b78-aa43-8a583718e31e" />
-
 # S32Engine
 
-> Небольшой самописный движок для **M5Cardputer**. Ты рисуешь картинку в свой
-> буфер пикселей, а движок сам крутит игровой цикл и раз в кадр выливает этот
-> буфер на экран. Никаких сцен, ECS и менеджеров ресурсов — только то, что
-> реально нужно, чтобы что-то показать на экранчике Cardputer'а.
+![platform](https://img.shields.io/badge/platform-ESP32--S3-blue)
+![board](https://img.shields.io/badge/board-M5Cardputer-orange)
+![framework](https://img.shields.io/badge/framework-Arduino-00979D)
+![license](https://img.shields.io/badge/license-GPL--3.0-green)
 
-Это пет-проект под конкретную железку, а не универсальный фреймворк. Ядро
-сознательно держится маленьким: пара структур, главный цикл и тонкие драйверы
-поверх библиотеки M5Cardputer. Хочешь больше — дописываешь под себя.
+A small framebuffer game engine for the M5Cardputer (M5StampS3 / ESP32-S3).
 
----
+You draw into a single pixel buffer and the engine runs the main loop, polls input and pushes that buffer to the screen once per frame. No scenes, no ECS, no resource managers. Just enough to get pixels moving on the Cardputer display and build a small game on top.
 
-## Содержание
+[Русская версия](README.ru.md)
 
-- [Что это такое](#что-это-такое)
-- [Железо](#железо)
-- [Как это устроено](#как-это-устроено)
-- [Структура проекта](#структура-проекта)
-- [Игровой цикл](#игровой-цикл)
-- [Графика](#графика)
-- [Драйверы](#драйверы)
-- [Управление](#управление)
-- [Сборка и прошивка](#сборка-и-прошивка)
-- [С чего начать свою игру](#с-чего-начать-свою-игру)
-- [Что уже работает и что нет](#что-уже-работает-и-что-нет)
-- [Планы](#планы)
-- [Лицензия](#лицензия)
+## Features
 
----
+- Double-free-friendly software framebuffer (RGB565), no direct-to-screen flicker
+- Fixed-step main loop at roughly 60 FPS with per-frame delta time
+- Minimal graphics API: clear, pixel, rectangle, sprite with color-key transparency
+- Driver layer behind function pointers (display, input, sound), so the core is not tied to one board
+- Single build target via PlatformIO, one library dependency
 
-## Что это такое
+## Hardware
 
-S32Engine — это framebuffer-движок. Идея простая:
+The target is the M5Cardputer, built around the M5StampS3 (ESP32-S3FN8).
 
-1. Есть один массив `uint16_t` на весь экран — это и есть кадр (формат цвета RGB565).
-2. Ты рисуешь в этот массив чем угодно: пиксели, прямоугольники, спрайты.
-3. Движок раз в кадр отдаёт массив дисплею целиком.
+- MCU: ESP32-S3FN8
+- Flash: 8 MB
+- SRAM: about 512 KB
+- PSRAM: none
+- Display: 240x135, RGB565
+- Keyboard: built in, no dedicated arrow keys
+- Audio: built in speaker
 
-Вся отрисовка идёт в память, а не напрямую в экран — поэтому нет мерцания и
-можно спокойно перерисовывать всё с нуля каждый кадр.
+There is no PSRAM, so the framebuffer lives in regular SRAM. At 240x135 and two bytes per pixel that is roughly 63 KB, which fits, but memory is tight overall and worth keeping in mind.
 
-Архитектура построена на **структурах с указателями на функции**. То есть
-дисплей, ввод и звук — это не жёстко зашитые вызовы M5Cardputer, а интерфейсы.
-Сейчас реализация одна (под Cardputer), но при желании ядро можно перенести на
-другую железку, просто подсунув свои драйверы и не трогая движок.
+## Architecture
 
----
+Everything is built around the `Engine` struct, which holds:
 
-## Железо
+- three drivers: `DisplayDriver`, `InputDriver`, `SoundDriver`
+- `graphicsInfo`, describing what and where graphics draws (buffer plus its dimensions)
+- a pointer to the framebuffer
+- the `is_running` flag
+- function pointers for the engine lifecycle: `init`, `update`, `shutdown`, `start`
 
-Цель — **M5Cardputer**. Внутри у него **M5StampS3** на чипе **ESP32-S3FN8**:
-
-| Параметр | Значение |
-|-----------------|-----------------------------------|
-| Чип | ESP32-S3FN8 |
-| Flash | 8 МБ |
-| SRAM | ~512 КБ |
-| PSRAM | нет |
-| Экран | 240×135, цвет RGB565 |
-| Клавиатура | встроенная, без отдельных стрелок |
-| Звук | встроенный динамик |
-
-Отдельно отмечу про PSRAM: его нет, так что весь фреймбуфер живёт в обычной
-SRAM. 240×135×2 байта ≈ 63 КБ — влезает, но памяти в целом немного, это стоит
-держать в голове.
-
----
-
-## Как это устроено
-
-Всё завязано вокруг структуры `Engine`. В ней лежат:
-
-- три драйвера — `DisplayDriver`, `InputDriver`, `SoundDriver`;
-- `graphicsInfo` — то, во что и куда рисует графика (буфер + его размеры);
-- указатель на сам фреймбуфер;
-- флаг `is_running`;
-- указатели на функции движка: `init`, `update`, `shutdown`, `start`.
-
-Стартует всё из `main.cpp`:
+Startup happens in `main.cpp`:
 
 ```cpp
 #include <M5Cardputer.h>
@@ -108,54 +73,44 @@ void loop() {
 }
 ```
 
-Порядок важный: сначала `M5Cardputer.begin()`, потом создание драйверов, потом
-`engine_init` и только затем `engine.start()`. `loop()` из Arduino намеренно
-пустой — движок крутит свой цикл внутри `start()` и наружу не возвращается,
-пока не выставят `is_running = false`.
+Order matters here: `M5Cardputer.begin()` first, then the drivers, then `engine_init`, and only then `engine.start()`. The Arduino `loop()` is empty on purpose. The engine runs its own loop inside `start()` and does not return until `is_running` is set to false.
 
----
-
-## Структура проекта
+## Project layout
 
 ```
 S32Engine/
-├── platformio.ini              конфиг сборки (плата, фреймворк, зависимости)
-├── CMakeLists.txt
-├── sdkconfig.esp32s3box
-├── LICENSE                     GPL-3.0
-├── README.md
-├── include/
-├── lib/
-├── test/
-└── src/
-    ├── main.cpp                точка входа, тут заводится движок
-    ├── CMakeLists.txt
-    └── components/
-        ├── engine/
-        │   ├── engine.h        структура Engine + engine_init
-        │   └── engine.cpp      главный цикл, init/update/shutdown/start
-        ├── graphics/
-        │   ├── graphics.h      объявления grx_*
-        │   └── graphics.cpp    рисование по буферу
-        ├── other/
-        │   └── struct.h        Color, Point, Pixel, Sprite, graphicsInfo
-        └── drivers/
-            └── M5StackCardputerV01/
-                ├── display.h / display.cpp   вывод буфера на экран
-                ├── input.h   / input.cpp     чтение клавиатуры
-                └── sound.h   / sound.cpp      динамик
+  platformio.ini              build config (board, framework, dependencies)
+  CMakeLists.txt
+  sdkconfig.esp32s3box
+  LICENSE                     GPL-3.0
+  README.md
+  include/
+  lib/
+  test/
+  src/
+    main.cpp                  entry point, wires up the engine
+    CMakeLists.txt
+    components/
+      engine/
+        engine.h              Engine struct and engine_init
+        engine.cpp            main loop, init/update/shutdown/start
+      graphics/
+        graphics.h            grx_ declarations
+        graphics.cpp          buffer drawing
+      other/
+        struct.h              Color, Point, Pixel, Sprite, graphicsInfo
+      drivers/
+        M5StackCardputerV01/
+          display.h / display.cpp   pushes the buffer to the screen
+          input.h   / input.cpp     reads the keyboard
+          sound.h   / sound.cpp      speaker
 ```
 
-Включения идут от корня `src`, например `#include "components/graphics/graphics.h"`.
-Это держится флагом `-I src` в `platformio.ini` — если его убрать, инклюды
-отвалятся.
+Includes are resolved from the `src` root, for example `#include "components/graphics/graphics.h"`. This relies on the `-I src` flag in `platformio.ini`. Remove it and the includes break.
 
----
+## Main loop
 
-## Игровой цикл
-
-Сердце движка — функция `engine_start`. Она блокирующая и работает, пока
-`is_running == true`:
+The core of the engine is `engine_start`. It is blocking and runs while `is_running` is true:
 
 ```cpp
 static void engine_start(Engine* self) {
@@ -163,33 +118,31 @@ static void engine_start(Engine* self) {
     int64_t prev = esp_timer_get_time();
 
     while (self->is_running) {
-        grx_clear(&self->ggf, 0x0000);          // очистить кадр
+        grx_clear(&self->ggf, 0x0000);          // clear the frame
 
         int64_t now = esp_timer_get_time();
-        int dt = (int)((now - prev) / 1000);    // дельта времени в мс
+        int dt = (int)((now - prev) / 1000);    // delta time in ms
         prev = now;
 
-        self->id.update(&self->id);             // опросить клавиатуру
-        self->update(self, dt);                 // твоя игровая логика
-        self->dd.flush(&self->dd, self->framebuffer);  // показать кадр
+        self->id.update(&self->id);             // poll the keyboard
+        self->update(self, dt);                 // your game logic
+        self->dd.flush(&self->dd, self->framebuffer);  // present the frame
 
-        vTaskDelay(pdMS_TO_TICKS(16));          // ~60 кадров в секунду
+        vTaskDelay(pdMS_TO_TICKS(16));          // about 60 frames per second
     }
 }
 ```
 
-Что происходит каждый кадр:
+Each frame:
 
-1. **Очистка** — весь буфер заливается чёрным (`0x0000`).
-2. **Замер времени** — считается `dt` (сколько миллисекунд прошло с прошлого кадра), чтобы движение можно было привязать ко времени, а не к номеру кадра.
-3. **Ввод** — драйвер обновляет состояние клавиатуры.
-4. **Апдейт** — вызывается `self->update`, куда ты кладёшь логику игры.
-5. **Flush** — готовый буфер целиком отправляется на дисплей.
-6. **Пауза** `vTaskDelay(16)` — уступает время FreeRTOS и держит темп около 60 FPS.
+1. Clear. The whole buffer is filled with black (0x0000).
+2. Timing. `dt` is computed as milliseconds since the previous frame, so movement can be tied to time instead of frame count.
+3. Input. The driver refreshes the keyboard state.
+4. Update. `self->update` is called, which is where game logic goes.
+5. Flush. The finished buffer is sent to the display in one call.
+6. Yield. `vTaskDelay(16)` hands time back to FreeRTOS and holds the pace near 60 FPS.
 
-`engine_init` заполняет структуру, привязывает функции движка, инициализирует
-все три драйвера и настраивает `graphicsInfo` (буфер + ширина/высота берутся
-из дисплея):
+`engine_init` fills the struct, binds the lifecycle functions, initializes all three drivers and sets up `graphicsInfo` (buffer, width and height come from the display):
 
 ```cpp
 void engine_init(Engine* self, DisplayDriver dd, InputDriver id,
@@ -215,19 +168,15 @@ void engine_init(Engine* self, DisplayDriver dd, InputDriver id,
 }
 ```
 
-`engine_shutdown` просто ставит `is_running = false`, и цикл на следующей
-итерации выходит.
+`engine_shutdown` sets `is_running` to false, and the loop exits on the next iteration.
 
----
+## Graphics API
 
-## Графика
-
-Вся отрисовка живёт в `graphics.cpp` и работает через `graphicsInfo` (буфер +
-его размеры). Базовые типы описаны в `other/struct.h`:
+All drawing lives in `graphics.cpp` and works through `graphicsInfo` (buffer plus dimensions). The base types are in `other/struct.h`:
 
 ```cpp
-typedef uint16_t Color;                          // цвет RGB565
-#define GRX_COLOR_TRANSPARENT ((Color)0xF81F)    // прозрачный (ядовитая магента)
+typedef uint16_t Color;                          // RGB565 color
+#define GRX_COLOR_TRANSPARENT ((Color)0xF81F)    // transparent (magenta)
 
 struct Point   { uint16_t x, y; };
 struct Pixel   { Color color; Point point; };
@@ -235,34 +184,27 @@ struct Sprite  { const Color* pixels; uint16_t width, height; };
 struct graphicsInfo { Color* buffer; uint16_t width, height; };
 ```
 
-Набор функций:
+Available functions:
 
-| Функция | Что делает |
-|--------------------------------------------------|--------------------------------------------------|
-| `grx_clear(g, color)` | залить весь буфер одним цветом |
-| `grx_setPixel(g, color, p)` | поставить пиксель (с проверкой границ) |
-| `grx_setPixel(g, pixel)` | то же, но через структуру `Pixel` |
-| `grx_getPixel(g, p)` | прочитать цвет пикселя |
-| `grx_fillRect(g, color, p0, p1)` | закрашенный прямоугольник по двум углам |
-| `grx_sprite(g, sprite, leftTop)` | нарисовать спрайт с учётом прозрачности |
+- `grx_clear(g, color)` fills the whole buffer with one color
+- `grx_setPixel(g, color, p)` sets a pixel with bounds checking
+- `grx_setPixel(g, pixel)` same, using a `Pixel` struct
+- `grx_getPixel(g, p)` reads a pixel color
+- `grx_fillRect(g, color, p0, p1)` filled rectangle defined by two corners
+- `grx_sprite(g, sprite, leftTop)` draws a sprite with color-key transparency
 
-Несколько важных деталей:
+A few details worth knowing:
 
-- Все функции **проверяют границы** — за пределы буфера ничего не вылезет.
-- `grx_fillRect` сам разбирается, какой угол левый-верхний, и обрезает
-  прямоугольник по экрану, так что порядок точек не важен.
-- `grx_sprite` пропускает пиксели цвета `0xF81F` — это и есть «прозрачность».
-  То есть спрайты можно рисовать поверх фона без прямоугольной подложки.
-- Пиксель адресуется как `buffer[y * width + x]` — обычный линейный буфер.
+- Every function is bounds checked, so nothing writes outside the buffer.
+- `grx_fillRect` figures out the top-left corner itself and clips to the screen, so the order of the two points does not matter.
+- `grx_sprite` skips pixels of color 0xF81F, which acts as transparency, so sprites can be drawn over a background without a rectangular backing.
+- Pixels are addressed as `buffer[y * width + x]`, a plain linear buffer.
 
----
+## Drivers
 
-## Драйверы
+Every driver is a struct of function pointers, created by a `create_builtin_*()` factory.
 
-Все драйверы — это структуры с указателями на функции. Каждый создаётся своей
-фабрикой `create_builtin_*()`.
-
-### Дисплей (`DisplayDriver`)
+### Display (DisplayDriver)
 
 ```cpp
 struct DisplayDriver {
@@ -273,19 +215,16 @@ struct DisplayDriver {
 };
 ```
 
-`init` берёт реальные размеры экрана у `M5Cardputer.Display` (240×135), а
-`flush` выливает весь буфер на экран одним вызовом `pushImage`. Обрати
-внимание: `M5Cardputer.begin()` должен быть вызван в `main` **до** инициализации
-драйвера.
+`init` reads the real screen size from `M5Cardputer.Display` (240x135), and `flush` pushes the whole buffer to the screen with a single `pushImage` call. `M5Cardputer.begin()` must be called in `main` before the driver is initialized.
 
-### Ввод (`InputDriver`)
+### Input (InputDriver)
 
 ```cpp
 struct InputState {
     bool up, down, left, right;
     bool action;    // Enter / Space
-    bool quit;      // клавиша `
-    char last_key;  // последний нажатый символ (0 = ничего)
+    bool quit;      // ` key
+    char last_key;  // last typed character (0 = none)
 };
 
 struct InputDriver {
@@ -295,11 +234,9 @@ struct InputDriver {
 };
 ```
 
-Каждый кадр `update` дёргает `M5Cardputer.update()`, читает нажатые клавиши и
-собирает свежий `InputState`. Помимо разложенных по флагам стрелок/действий
-сохраняется и `last_key` — последний введённый символ, удобно для текста и меню.
+Each frame `update` calls `M5Cardputer.update()`, reads the pressed keys and builds a fresh `InputState`. Besides the movement and action flags it keeps `last_key`, the last typed character, which is handy for text input and menus.
 
-### Звук (`SoundDriver`)
+### Sound (SoundDriver)
 
 ```cpp
 struct SoundDriver {
@@ -310,33 +247,24 @@ struct SoundDriver {
 };
 ```
 
-Тонкая обёртка над `M5Cardputer.Speaker`: инициализация, проигрывание WAV из
-памяти по каналу и остановка канала.
+A thin wrapper over `M5Cardputer.Speaker`: init, play a WAV from memory on a channel, and stop a channel.
 
----
+## Controls
 
-## Управление
+The Cardputer has no dedicated arrow keys, so the cluster in the lower right of the keyboard is used instead:
 
-У Cardputer нет отдельных стрелок, поэтому под них отданы соседние клавиши в
-правом нижнем углу клавиатуры:
+- `;` up
+- `.` down
+- `,` left
+- `/` right
+- Enter or Space action
+- `` ` `` quit
 
-| Клавиша | Действие |
-|--------------|--------------|
-| `;` | вверх |
-| `.` | вниз |
-| `,` | влево |
-| `/` | вправо |
-| `Enter` / `Space` | действие |
-| `` ` `` | выход |
+The keys `;` `.` `,` `/` sit in a cross shape, which makes them comfortable to play with.
 
-Раскладка «стрелок» `; . , /` расположена крестиком, так что играть вполне
-удобно.
+## Building
 
----
-
-## Сборка и прошивка
-
-Проект собирается через **PlatformIO**. Конфиг:
+The project builds with PlatformIO.
 
 ```ini
 [env:cardputer]
@@ -351,27 +279,24 @@ lib_deps =
     m5stack/M5Cardputer
 ```
 
-Команды:
+Commands:
 
 ```bash
-pio run -e cardputer               # собрать
-pio run -e cardputer -t upload      # собрать и прошить
-pio device monitor -b 115200        # монитор порта
+pio run -e cardputer               # build
+pio run -e cardputer -t upload      # build and flash
+pio device monitor -b 115200        # serial monitor
 ```
 
-На что обратить внимание:
+Build notes:
 
-- Плата — именно `m5stack-stamps3`. Не `esp32s3box`.
-- Фреймворк — `arduino`. На `espidf` M5Cardputer/LovyanGFX не соберутся.
-- Флаг `-I src` обязателен, иначе инклюды вида `components/...` не найдутся.
-- Зависимость всего одна — `m5stack/M5Cardputer`, PlatformIO подтянет её сам.
+- The board is `m5stack-stamps3`, not `esp32s3box`.
+- The framework is `arduino`. M5Cardputer and LovyanGFX will not build under espidf.
+- The `-I src` flag is required, otherwise includes like `components/...` are not found.
+- There is a single dependency, `m5stack/M5Cardputer`, which PlatformIO pulls in automatically.
 
----
+## Writing your first update
 
-## С чего начать свою игру
-
-Вся твоя логика живёт в функции апдейта движка. Сейчас `engine_update` —
-пустая заглушка:
+All of your logic goes in the engine update function. Right now `engine_update` is an empty stub:
 
 ```cpp
 static void engine_update(Engine* self, int dt) {
@@ -380,8 +305,7 @@ static void engine_update(Engine* self, int dt) {
 }
 ```
 
-Чтобы что-то нарисовать, работай с `self->ggf` через функции `grx_*`, а ввод
-бери из `self->id.state`. Например, движущийся квадратик:
+To draw something, work with `self->ggf` through the `grx_` functions and read input from `self->id.state`. For example, a movable square:
 
 ```cpp
 static int x = 100, y = 60;
@@ -402,39 +326,33 @@ static void engine_update(Engine* self, int dt) {
 }
 ```
 
-Очистку экрана делать не надо — движок уже чистит буфер в начале каждого кадра.
+You do not need to clear the screen yourself, the engine already clears the buffer at the start of each frame.
 
----
+## Status
 
-## Что уже работает и что нет
+Done:
 
-**Готово:**
+- Framebuffer and main loop at 60 FPS with delta time
+- Graphics: clear, pixels, pixel read, rectangles, sprites with transparency
+- Display driver (buffer output through M5Cardputer.Display)
+- Keyboard driver (arrows, action, quit, last key)
+- Sound driver (WAV per channel through M5Cardputer.Speaker)
+- Working PlatformIO build
 
-- Фреймбуфер и главный цикл на ~60 FPS с подсчётом `dt`.
-- Графика: заливка, пиксели, чтение пикселя, прямоугольники, спрайты с прозрачностью.
-- Драйвер дисплея (вывод буфера через M5Cardputer.Display).
-- Драйвер клавиатуры (стрелки, действие, выход, последний символ).
-- Драйвер звука (WAV по каналам через M5Cardputer.Speaker).
-- Настроенная сборка под PlatformIO.
+Not there yet:
 
-**Пока нет / заглушки:**
+- `engine_update` is empty, this is a skeleton for a game, not a finished game
+- No asset or sprite loading, everything is defined in code
+- Sound is at a very basic level (play or stop a WAV)
+- Graphics has no lines, circles or text yet, only what is listed above
 
-- `engine_update` пустой — это каркас под игру, а не готовая игрушка.
-- Нет загрузки ассетов/спрайтов, всё пока задаётся в коде.
-- Звук на самом базовом уровне (проиграть/остановить WAV).
-- В графике нет линий, окружностей, текста — только то, что перечислено выше.
+## Roadmap
 
----
+- Real game logic in `update` instead of the stub
+- Sprite and asset loading (from SD card or flash)
+- More graphics primitives: lines, circles, text
+- A more complete sound layer
 
-## Планы
+## License
 
-- Реальная игровая логика в `update` вместо заглушки.
-- Загрузка спрайтов и ассетов (с SD-карты или из флеша).
-- Больше примитивов в графике: линии, окружности, вывод текста.
-- Доработать звук.
-
----
-
-## Лицензия
-
-GPL-3.0. Полный текст — в файле `LICENSE` в корне репозитория.
+GPL-3.0. The full text is in the LICENSE file at the repository root.
